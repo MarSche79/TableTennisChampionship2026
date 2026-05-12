@@ -290,24 +290,33 @@ body {
   to { top: 110vh; transform: rotate(720deg) translateX(100px); opacity: 0; }
 }
 
-/* ── Admin Toggle ── */
-.admin-bar {
+/* ── Auth Bar ── */
+.auth-bar {
   display: flex; align-items: center; justify-content: flex-end;
   gap: 12px; padding: 8px 32px; background: var(--cp-surface-soft);
-  border-bottom: 1px solid var(--cp-border); font-size: 0.8rem;
+  border-bottom: 1px solid var(--cp-border); font-size: 0.85rem;
+  color: var(--cp-text-muted);
 }
-.toggle-switch { position: relative; width: 40px; height: 22px; cursor: pointer; }
-.toggle-switch input { opacity: 0; width: 0; height: 0; }
-.toggle-slider {
-  position: absolute; inset: 0; background: var(--cp-border-strong);
-  border-radius: 11px; transition: 0.2s;
+.auth-bar .auth-user { font-weight: 500; color: var(--cp-text); }
+.auth-bar .auth-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 10px; border-radius: 999px;
+  background: rgba(22, 163, 74, 0.12); color: var(--cp-success);
+  font-size: 0.75rem; font-weight: 600;
 }
-.toggle-slider::before {
-  content: ''; position: absolute; width: 16px; height: 16px;
-  left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: 0.2s;
+.auth-bar .btn-auth {
+  padding: 6px 14px; border: 1px solid var(--cp-border-strong);
+  background: var(--cp-surface); color: var(--cp-text);
+  border-radius: 0.5rem; cursor: pointer; font-size: 0.8rem; font-weight: 500;
+  text-decoration: none; transition: all 0.15s;
 }
-.toggle-switch input:checked + .toggle-slider { background: var(--cp-accent); }
-.toggle-switch input:checked + .toggle-slider::before { left: 21px; }
+.auth-bar .btn-auth:hover { border-color: var(--cp-accent); color: var(--cp-accent); }
+.read-only-banner {
+  background: rgba(0, 120, 212, 0.08);
+  border-bottom: 1px solid rgba(0, 120, 212, 0.25);
+  color: var(--cp-text-muted);
+  font-size: 0.8rem; text-align: center; padding: 6px 16px;
+}
 
 /* ── Footer ── */
 .footer { text-align: center; padding: 24px; color: var(--cp-text-muted); font-size: 0.8rem; border-top: 1px solid var(--cp-border); margin-top: 32px; }
@@ -352,12 +361,11 @@ body {
   <div id="statusBadge" class="status-badge status-registration">Registration Open</div>
 </div>
 
-<div class="admin-bar">
-  <span style="color:var(--cp-text-muted)">🔒 Admin Mode</span>
-  <label class="toggle-switch">
-    <input type="checkbox" id="adminToggle" checked>
-    <span class="toggle-slider"></span>
-  </label>
+<div class="auth-bar" id="authBar">
+  <span id="authStatus">Checking sign-in…</span>
+</div>
+<div class="read-only-banner" id="readOnlyBanner" style="display:none">
+  👁️ Read-only view — sign in with a <strong>threatninja.at</strong> account to manage the tournament.
 </div>
 
 <nav class="nav">
@@ -594,8 +602,7 @@ body {
 
 <script>
 // ── State ──
-const STORAGE_KEY = 'tt_championship_2026';
-let state = loadState();
+let state = defaultState();
 let currentModal = null;
 
 function defaultState() {
@@ -605,20 +612,85 @@ function defaultState() {
     rounds: 0,
     status: 'registration', // registration | in_progress | completed
     champion: null,
-    isAdmin: true
+    isAdmin: false
   };
 }
 
-function loadState() {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) return { ...defaultState(), ...JSON.parse(saved) };
-  } catch(e) {}
-  return defaultState();
+// ── Server-backed state (Azure Blob via /api/state) ──
+const API_URL = '/api/state';
+let _saveQueue = Promise.resolve();
+let _pendingSave = false;
+let _lastSavedJSON = null;
+
+async function fetchServerState() {
+  const res = await fetch(API_URL, { credentials: 'include', cache: 'no-store' });
+  if (!res.ok) throw new Error('Failed to load state: ' + res.status);
+  return res.json();
 }
 
+function mergeServerState(server) {
+  // Keep client-only isAdmin flag; replace persisted fields with server truth.
+  state = {
+    ...defaultState(),
+    ...server,
+    isAdmin: state.isAdmin === true
+  };
+  _lastSavedJSON = serializePersisted(state);
+}
+
+function serializePersisted(s) {
+  return JSON.stringify({
+    players: s.players, matches: s.matches, rounds: s.rounds,
+    status: s.status, champion: s.champion
+  });
+}
+
+// saveState() is called from many places synchronously. We update the UI
+// immediately and push to the server in the background (serialized queue).
 function saveState() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  if (!state.isAdmin) {
+    // Viewers are not allowed to mutate — silently ignore (should not happen via UI).
+    return;
+  }
+  const payload = serializePersisted(state);
+  if (payload === _lastSavedJSON) return;
+  _lastSavedJSON = payload;
+  _pendingSave = true;
+  setSaveIndicator('saving');
+  _saveQueue = _saveQueue.then(async () => {
+    try {
+      const res = await fetch(API_URL, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload
+      });
+      if (res.status === 401 || res.status === 403) {
+        toast('Sign-in expired or not authorized. Please sign in again.', 'error');
+        state.isAdmin = false;
+        applyAuthUI(null);
+        render();
+        return;
+      }
+      if (!res.ok) throw new Error('Save failed: ' + res.status);
+      setSaveIndicator('saved');
+    } catch (err) {
+      console.error(err);
+      toast('Could not save changes. Retrying on next action.', 'error');
+      _lastSavedJSON = null; // force retry on next save
+      setSaveIndicator('error');
+    } finally {
+      _pendingSave = false;
+    }
+  });
+}
+
+function setSaveIndicator(kind) {
+  const el = document.getElementById('saveIndicator');
+  if (!el) return;
+  if (kind === 'saving') { el.textContent = '💾 Saving…'; el.style.display = ''; }
+  else if (kind === 'saved') { el.textContent = '✓ Saved'; el.style.display = ''; setTimeout(() => { if (!_pendingSave) el.style.display = 'none'; }, 1500); }
+  else if (kind === 'error') { el.textContent = '⚠ Save failed'; el.style.display = ''; }
 }
 
 // ── Tab Navigation ──
@@ -631,18 +703,83 @@ document.querySelectorAll('.nav button').forEach(btn => {
   });
 });
 
-// ── Admin Toggle ──
-document.getElementById('adminToggle').addEventListener('change', (e) => {
-  state.isAdmin = e.target.checked;
-  saveState();
+// ── Authentication (Azure Static Web Apps / Entra ID) ──
+const AAD_TENANT_ID = 'b24c82d6-b961-4584-b030-8e90c039fa28';
+
+async function fetchClientPrincipal() {
+  try {
+    const r = await fetch('/.auth/me', { credentials: 'include', cache: 'no-store' });
+    if (!r.ok) return null;
+    const data = await r.json();
+    const p = (data.clientPrincipal) || (Array.isArray(data) ? data[0] : null);
+    return p || null;
+  } catch { return null; }
+}
+
+function principalTenantId(p) {
+  if (!p || !p.claims) return null;
+  const c = p.claims.find(c =>
+    c.typ === 'http://schemas.microsoft.com/identity/claims/tenantid' || c.typ === 'tid'
+  );
+  return c ? c.val : null;
+}
+
+function applyAuthUI(principal) {
+  const bar = document.getElementById('authBar');
+  const banner = document.getElementById('readOnlyBanner');
+  if (principal && principal.identityProvider === 'aad' && principalTenantId(principal) === AAD_TENANT_ID) {
+    state.isAdmin = true;
+    const name = principal.userDetails || 'Admin';
+    bar.innerHTML = `
+      <span id="saveIndicator" style="display:none;color:var(--cp-text-muted);font-size:0.78rem"></span>
+      <span class="auth-badge">🛡 Admin</span>
+      <span class="auth-user">${escHtml(name)}</span>
+      <a class="btn-auth" href="/.auth/logout?post_logout_redirect_uri=/">Sign out</a>`;
+    banner.style.display = 'none';
+  } else {
+    state.isAdmin = false;
+    bar.innerHTML = `
+      <span style="color:var(--cp-text-muted)">👁️ Viewing as guest</span>
+      <a class="btn-auth" href="/.auth/login/aad?post_login_redirect_uri=/">Sign in</a>`;
+    banner.style.display = '';
+    if (principal && principal.identityProvider === 'aad' && principalTenantId(principal) !== AAD_TENANT_ID) {
+      toast('Your account is not in the threatninja.at tenant — read-only access.', 'error');
+    }
+  }
+}
+
+async function init() {
+  const principal = await fetchClientPrincipal();
+  applyAuthUI(principal);
+  try {
+    const server = await fetchServerState();
+    mergeServerState(server);
+  } catch (err) {
+    console.error('State load failed:', err);
+    toast('Could not load tournament state from server.', 'error');
+  }
   render();
-});
+  // Auto-refresh for viewers so they see admin changes without reloading.
+  if (!state.isAdmin) {
+    setInterval(async () => {
+      try {
+        const s = await fetchServerState();
+        const newJSON = JSON.stringify({ players: s.players, matches: s.matches, rounds: s.rounds, status: s.status, champion: s.champion });
+        if (newJSON !== _lastSavedJSON) {
+          mergeServerState(s);
+          render();
+        }
+      } catch {}
+    }, 15000);
+  }
+}
 
 // ── Players ──
 const playerInput = document.getElementById('playerNameInput');
 playerInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addPlayer(); });
 
 function addPlayer() {
+  if (!state.isAdmin) return;
   const name = playerInput.value.trim();
   if (!name) return;
   if (state.players.find(p => p.name.toLowerCase() === name.toLowerCase())) {
@@ -661,6 +798,7 @@ function addPlayer() {
 }
 
 function removePlayer(id) {
+  if (!state.isAdmin) return;
   const p = state.players.find(p => p.id === id);
   state.players = state.players.filter(p => p.id !== id);
   saveState();
@@ -670,6 +808,7 @@ function removePlayer(id) {
 
 // ── Bracket Generation ──
 function generateBracket() {
+  if (!state.isAdmin) return;
   const n = state.players.length;
   if (n < 3) { toast('Need at least 3 players!', 'error'); return; }
 
@@ -819,6 +958,7 @@ function closeModal() {
 }
 
 function submitScore() {
+  if (!state.isAdmin) return;
   const match = state.matches.find(m => m.id === currentModal);
   if (!match) return;
 
@@ -1097,8 +1237,6 @@ function renderAdminControls() {
   const genSection = document.getElementById('generateSection');
   const resetSection = document.getElementById('resetSection');
 
-  document.getElementById('adminToggle').checked = state.isAdmin;
-
   if (state.status === 'registration') {
     addCard.style.display = state.isAdmin ? '' : 'none';
     genSection.style.display = (state.isAdmin && state.players.length >= 3) ? '' : 'none';
@@ -1118,7 +1256,8 @@ function cancelReset() {
   document.getElementById('confirmResetBar').style.display = 'none';
 }
 function resetTournament() {
-  state = defaultState();
+  if (!state.isAdmin) return;
+  state = { ...defaultState(), isAdmin: true };
   saveState();
   render();
   toast('Tournament reset! 🔄');
@@ -1179,7 +1318,7 @@ function switchLang(lang) {
 }
 
 // ── Init ──
-render();
+init();
 </script>
 </body>
 </html>

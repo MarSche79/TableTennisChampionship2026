@@ -1,0 +1,11 @@
+{
+  "name": "tabletennis-api",
+  "version": "1.0.0",
+  "description": "Azure Functions backend for Table Tennis Championship 2026",
+  "main": "state/index.js",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@azure/identity": "^4.4.1",
+    "@azure/storage-blob": "^12.24.0"
+  }
+}
