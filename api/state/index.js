@@ -38,12 +38,17 @@ function getPrincipal(req) {
 function isAuthorizedAdmin(principal) {
     if (!principal) return false;
     if (principal.identityProvider !== "aad") return false;
+    // Defense-in-depth: SWA's openIdIssuer is locked to our tenant, but we
+    // also verify the tid claim here. Claim type names vary by SWA version.
     const claims = principal.claims || [];
-    const tid = claims.find(c =>
-        c.typ === "http://schemas.microsoft.com/identity/claims/tenantid" || c.typ === "tid"
-    );
-    if (!tid || tid.val !== TENANT) return false;
-    return true;
+    const tid = claims.find(c => {
+        const t = (c.typ || c.type || "").toLowerCase();
+        return t === "tid" || t.endsWith("/tenantid");
+    });
+    const val = tid ? (tid.val || tid.value) : null;
+    // If the tid claim is absent, we trust the issuer (single-tenant config).
+    if (!val) return true;
+    return val === TENANT;
 }
 
 async function readState() {

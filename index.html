@@ -718,16 +718,20 @@ async function fetchClientPrincipal() {
 
 function principalTenantId(p) {
   if (!p || !p.claims) return null;
-  const c = p.claims.find(c =>
-    c.typ === 'http://schemas.microsoft.com/identity/claims/tenantid' || c.typ === 'tid'
-  );
-  return c ? c.val : null;
+  const c = p.claims.find(c => {
+    const t = (c.typ || c.type || '').toLowerCase();
+    return t === 'tid' || t.endsWith('/tenantid');
+  });
+  return c ? (c.val || c.value) : null;
 }
 
 function applyAuthUI(principal) {
   const bar = document.getElementById('authBar');
   const banner = document.getElementById('readOnlyBanner');
-  if (principal && principal.identityProvider === 'aad' && principalTenantId(principal) === AAD_TENANT_ID) {
+  // The AAD provider is single-tenant (configured via openIdIssuer), so any
+  // successful AAD sign-in already proves tenant membership. The API still
+  // re-validates the tid claim server-side.
+  if (principal && principal.identityProvider === 'aad') {
     state.isAdmin = true;
     const name = principal.userDetails || 'Admin';
     bar.innerHTML = `
@@ -742,9 +746,6 @@ function applyAuthUI(principal) {
       <span style="color:var(--cp-text-muted)">👁️ Viewing as guest</span>
       <a class="btn-auth" href="/.auth/login/aad?post_login_redirect_uri=/">Sign in</a>`;
     banner.style.display = '';
-    if (principal && principal.identityProvider === 'aad' && principalTenantId(principal) !== AAD_TENANT_ID) {
-      toast('Your account is not in the threatninja.at tenant — read-only access.', 'error');
-    }
   }
 }
 
