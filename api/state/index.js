@@ -1,12 +1,6 @@
-const { BlobServiceClient } = require("@azure/storage-blob");
-const { ClientSecretCredential } = require("@azure/identity");
+const { Pool } = require("pg");
 
-const ACCOUNT = process.env.STORAGE_ACCOUNT;
 const TENANT = process.env.AAD_TENANT_ID;
-const CLIENT_ID = process.env.AAD_CLIENT_ID;
-const CLIENT_SECRET = process.env.AAD_CLIENT_SECRET;
-const CONTAINER = "state";
-const BLOB = "tournament.json";
 
 const DEFAULT_STATE = {
     players: [],
@@ -16,13 +10,18 @@ const DEFAULT_STATE = {
     champion: null
 };
 
-let blobClient;
-function getBlobClient() {
-    if (blobClient) return blobClient;
-    const credential = new ClientSecretCredential(TENANT, CLIENT_ID, CLIENT_SECRET);
-    const service = new BlobServiceClient(`https://${ACCOUNT}.blob.core.windows.net`, credential);
-    blobClient = service.getContainerClient(CONTAINER).getBlockBlobClient(BLOB);
-    return blobClient;
+// Module-level pool reused across Azure Function invocations
+let pool;
+function getPool() {
+    if (pool) return pool;
+    pool = new Pool({
+        connectionString: process.env.DATABASE_URL,
+        ssl: { rejectUnauthorized: true },
+        max: 2,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 5000
+    });
+    return pool;
 }
 
 function getPrincipal(req) {
@@ -38,34 +37,50 @@ function getPrincipal(req) {
 function isAuthorizedAdmin(principal) {
     if (!principal) return false;
     if (principal.identityProvider !== "aad") return false;
-    // Defense-in-depth: SWA's openIdIssuer is locked to our tenant, but we
-    // also verify the tid claim here. Claim type names vary by SWA version.
     const claims = principal.claims || [];
     const tid = claims.find(c => {
         const t = (c.typ || c.type || "").toLowerCase();
         return t === "tid" || t.endsWith("/tenantid");
     });
     const val = tid ? (tid.val || tid.value) : null;
-    // If the tid claim is absent, we trust the issuer (single-tenant config).
     if (!val) return true;
     return val === TENANT;
 }
 
+async function ensureTable(client) {
+    await client.query(`
+        CREATE TABLE IF NOT EXISTS tournament_state (
+            id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+            data JSONB NOT NULL,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    `);
+}
+
 async function readState() {
+    const client = await getPool().connect();
     try {
-        const buf = await getBlobClient().downloadToBuffer();
-        return JSON.parse(buf.toString("utf8"));
-    } catch (err) {
-        if (err.statusCode === 404) return DEFAULT_STATE;
-        throw err;
+        await ensureTable(client);
+        const res = await client.query("SELECT data FROM tournament_state WHERE id = 1");
+        return res.rows.length > 0 ? res.rows[0].data : DEFAULT_STATE;
+    } finally {
+        client.release();
     }
 }
 
 async function writeState(state) {
-    const data = JSON.stringify(state);
-    await getBlobClient().upload(data, Buffer.byteLength(data), {
-        blobHTTPHeaders: { blobContentType: "application/json" }
-    });
+    const client = await getPool().connect();
+    try {
+        await ensureTable(client);
+        await client.query(
+            `INSERT INTO tournament_state (id, data, updated_at)
+             VALUES (1, $1, NOW())
+             ON CONFLICT (id) DO UPDATE SET data = $1, updated_at = NOW()`,
+            [JSON.stringify(state)]
+        );
+    } finally {
+        client.release();
+    }
 }
 
 module.exports = async function (context, req) {

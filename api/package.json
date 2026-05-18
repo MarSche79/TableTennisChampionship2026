@@ -5,7 +5,6 @@
   "main": "state/index.js",
   "engines": { "node": ">=20" },
   "dependencies": {
-    "@azure/identity": "^4.4.1",
-    "@azure/storage-blob": "^12.24.0"
+    "pg": "^8.13.0"
   }
 }

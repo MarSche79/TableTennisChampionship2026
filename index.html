@@ -174,7 +174,8 @@ body {
 
 /* ── Bracket Tab ── */
 .bracket-container { overflow-x: auto; padding: 20px 0; }
-.bracket { display: flex; align-items: stretch; gap: 0; min-width: fit-content; }
+.bracket { display: flex; align-items: stretch; gap: 0; min-width: fit-content; position: relative; }
+.bracket-connectors { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; overflow: visible; }
 .round { display: flex; flex-direction: column; justify-content: center; min-width: 240px; position: relative; }
 .round-label { text-align: center; font-size: 0.8rem; font-weight: 600; color: var(--cp-text-muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 16px; padding: 6px 12px; background: var(--cp-surface-soft); border-radius: 8px; margin: 0 8px 16px 8px; }
 
@@ -1112,7 +1113,7 @@ function renderBracket() {
       html += `<div class="match-wrapper">`;
 
       if (match.bye) {
-        html += `<div class="${matchClass}">
+        html += `<div class="${matchClass}" data-match-id="${match.id}">
           <div class="match-label">BYE</div>
           <div class="match-slot winner">
             <span class="player-name">${p1 ? escHtml(p1.name) : 'TBD'}</span>
@@ -1120,7 +1121,7 @@ function renderBracket() {
           </div>
         </div>`;
       } else {
-        html += `<div class="${matchClass}" ${onClick} title="${clickable ? 'Click to enter score' : ''}">
+        html += `<div class="${matchClass}" data-match-id="${match.id}" ${onClick} title="${clickable ? 'Click to enter score' : ''}">
           <div class="match-label">M${match.position + 1}</div>
           <div class="match-slot ${p1Winner ? 'winner' : ''}">
             <span class="player-name ${!p1 ? 'tbd' : ''}">${p1 ? escHtml(p1.name) : 'TBD'}</span>
@@ -1153,6 +1154,7 @@ function renderBracket() {
 
   html += '</div>';
   container.innerHTML = html;
+  requestAnimationFrame(() => drawConnectorLines());
 }
 
 function renderResults() {
@@ -1265,6 +1267,63 @@ function resetTournament() {
   cancelReset();
 }
 
+// ── Bracket Connector Lines ──
+function drawConnectorLines() {
+  const bracket = document.querySelector('.bracket');
+  if (!bracket) return;
+
+  const existing = bracket.querySelector('.bracket-connectors');
+  if (existing) existing.remove();
+
+  if (state.matches.length === 0 || state.rounds <= 1) return;
+
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.classList.add('bracket-connectors');
+  svg.setAttribute('width', bracket.scrollWidth);
+  svg.setAttribute('height', bracket.scrollHeight);
+  bracket.appendChild(svg);
+
+  const bracketRect = bracket.getBoundingClientRect();
+
+  for (let r = 1; r < state.rounds; r++) {
+    const curMatches = state.matches
+      .filter(m => m.round === r)
+      .sort((a, b) => a.position - b.position);
+    const nextMatches = state.matches
+      .filter(m => m.round === r + 1)
+      .sort((a, b) => a.position - b.position);
+
+    for (let i = 0; i < curMatches.length; i += 2) {
+      const el1 = bracket.querySelector(`[data-match-id="${curMatches[i].id}"]`);
+      const el2 = curMatches[i + 1] ? bracket.querySelector(`[data-match-id="${curMatches[i + 1].id}"]`) : null;
+      const nextEl = bracket.querySelector(`[data-match-id="${nextMatches[Math.floor(i / 2)].id}"]`);
+
+      if (!el1 || !nextEl) continue;
+
+      const r1 = el1.getBoundingClientRect();
+      const r2 = el2 ? el2.getBoundingClientRect() : r1;
+      const rN = nextEl.getBoundingClientRect();
+
+      const x1 = r1.right - bracketRect.left;
+      const y1 = (r1.top + r1.bottom) / 2 - bracketRect.top;
+      const y2 = (r2.top + r2.bottom) / 2 - bracketRect.top;
+      const x2 = rN.left - bracketRect.left;
+      const yMid = (y1 + y2) / 2;
+      const xMid = (x1 + x2) / 2;
+
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      if (el2 && el1 !== el2) {
+        path.setAttribute('d',
+          `M${x1},${y1} H${xMid} V${yMid} H${x2} M${x1},${y2} H${xMid} V${yMid}`);
+      } else {
+        path.setAttribute('d', `M${x1},${y1} H${x2}`);
+      }
+      path.setAttribute('style', 'stroke: var(--cp-border-strong); stroke-width: 1.5; fill: none; opacity: 0.5;');
+      svg.appendChild(path);
+    }
+  }
+}
+
 // ── Helpers ──
 function getRoundName(round, totalRounds) {
   const remaining = totalRounds - round;
@@ -1319,6 +1378,11 @@ function switchLang(lang) {
 }
 
 // ── Init ──
+let resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => drawConnectorLines(), 100);
+});
 init();
 </script>
 </body>
