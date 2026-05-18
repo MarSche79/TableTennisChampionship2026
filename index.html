@@ -701,6 +701,9 @@ document.querySelectorAll('.nav button').forEach(btn => {
     btn.classList.add('active');
     document.querySelectorAll('.tab-content').forEach(t => t.style.display = 'none');
     document.getElementById('tab-' + btn.dataset.tab).style.display = '';
+    if (btn.dataset.tab === 'bracket') {
+      requestAnimationFrame(() => drawConnectorLines());
+    }
   });
 });
 
@@ -1318,7 +1321,7 @@ function drawConnectorLines() {
       } else {
         path.setAttribute('d', `M${x1},${y1} H${x2}`);
       }
-      path.setAttribute('style', 'stroke: var(--cp-border-strong); stroke-width: 1.5; fill: none; opacity: 0.5;');
+      path.setAttribute('style', 'stroke: var(--cp-text-muted); stroke-width: 2; fill: none; opacity: 0.7;');
       svg.appendChild(path);
     }
   }
